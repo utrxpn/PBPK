@@ -1,0 +1,17 @@
+# Python bytecode & cache folders (created when you run python scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Streamlit local settings & secrets (if you ever add them later)
+.streamlit/secrets.toml
+
+# Virtual environments (if you created one locally)
+venv/
+env/
+.venv/
+
+# System / IDE files
+.DS_Store
+.vscode/
+.idea/

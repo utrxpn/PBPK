@@ -1,0 +1,5 @@
+streamlit
+numpy
+matplotlib.pyplot
+plotly.graph_objects
+scipy
