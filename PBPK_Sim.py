@@ -135,13 +135,13 @@ def vascular_diffusion(X, Y, t, M, D, J, n_points=50):
 
     for i in range(n_points):
         r = np.sqrt((X - vessel_x[i]) ** 2 + (Y - vessel_y[i]) ** 2)
-        c_total += radial_diffusion(r, t, effective_M, D)
+        c_total += radial_diffusion(r, t, effective_M / n_points, D)
     return c_total
 
 
 st.title("PBPK/PD Drug Simulation")
 tab1, tab2, tab3 = st.tabs(
-    ["Simulation", "Spatial Diffusion", "Vascular Network Simulation"]
+    ["Pharmodynamics Simulation", "Point Diffusion", "Vascular Network Simulation"]
 )
 
 
@@ -160,7 +160,7 @@ drug_presets = {
         "EC50_effect": 20,
         "EC50_toxic": 50,
         "Emax": 100,
-        "dwtr": 0.015,
+        "dwtr": 1.5,
     },
     "Ibuprofen": {
         "k_muscle": 0.08,
@@ -172,7 +172,7 @@ drug_presets = {
         "EC50_effect": 15,
         "EC50_toxic": 80,
         "Emax": 95,
-        "dwtr": 0.033,
+        "dwtr": 3.3,
     },
     "Acetaminophen": {
         "k_muscle": 0.06,
@@ -184,7 +184,7 @@ drug_presets = {
         "EC50_effect": 10,
         "EC50_toxic": 40,
         "Emax": 90,
-        "dwtr": 0.039,
+        "dwtr": 3.9,
     },
     "Warfarin": {
         "k_muscle": 0.03,
@@ -196,7 +196,19 @@ drug_presets = {
         "EC50_effect": 5,
         "EC50_toxic": 25,
         "Emax": 85,
-        "dwtr": 0.0096,
+        "dwtr": 0.96,
+    },
+    "Caffine": {
+        "k_muscle": 0.3,
+        "k_fat": 0.02,
+        "k_liver": 0.4,
+        "k_elim": 1.0,
+        "k_muscle_back": 0.3,
+        "k_fat_back": 0.4,
+        "EC50_effect": 8.7,
+        "EC50_toxic": 50.0,
+        "Emax": 100.0,
+        "dwtr": 2.268,
     },
 }
 
@@ -227,39 +239,83 @@ tissue_presets = {
 }
 
 
+def network_sources(vessels, density=10):
+    # returns x and y arrays of every source point, ~density points per mm of vessel
+    xs, ys = [], []
+    for k, (x0, y0, x1, y1) in enumerate(vessels):
+        length = np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+        n_seg = max(int(length * density), 2)
+        px = np.linspace(x0, x1, n_seg)
+        py = np.linspace(y0, y1, n_seg)
+        start = 0 if k == 0 else 1
+        xs.extend(px[start:])
+        ys.extend(py[start:])
+    return np.array(xs), np.array(ys)
+
+
 def branching_network(X, Y, t, M, D, J, vessels, n_points=20):
 
     c_total = np.zeros_like(X)
+    src_x, src_y = network_sources(vessels)
+
     effective_M = max(M * J, 0)
+    m_each = effective_M / len(src_x)
 
-    for x0, y0, x1, y1 in vessels:
-        # generate n_points along this vessel segment
-        seg_x = np.linspace(x0, x1, n_points)
-        seg_y = np.linspace(y0, y1, n_points)
-
-        for i in range(n_points):
-            r = np.sqrt((X - seg_x[i]) ** 2 + (Y - seg_y[i]) ** 2)
-            c_total += radial_diffusion(r, t, effective_M, D)
+    for sx, sy in zip(src_x, src_y):
+        r = np.sqrt((X - sx) ** 2 + (Y - sy) ** 2)
+        c_total += radial_diffusion(r, t, m_each, D)
 
     return c_total
 
 
-def plot_vessel_network(vessels, t, M, D, J, n_points=50):
+def plot_vessel_network(vessels, t, M, D, J, n_points=30):
     fig = go.Figure()
     effective_M = max(M * J, 0)
+    all_x, all_y = network_sources(vessels)
+    m_each = effective_M / len(all_x)
 
+    segments = []
     for x0, y0, x1, y1 in vessels:
         # generate points along segment
         seg_x = np.linspace(x0, x1, n_points)
         seg_y = np.linspace(y0, y1, n_points)
+        seg_c = []
+        for px, py in zip(seg_x, seg_y):
+            r = np.sqrt((all_x - px) ** 2 + (all_y - py) ** 2)
+            con_pt = radial_diffusion(r, t, m_each, D)
+            seg_c.append(np.sum(con_pt))
 
-        # concentration at each point along vessel (r=0, at the source)
-        # use a small r to avoid division issues
-        # distance from center of main vessel (0,0)
-        seg_c = [
-            radial_diffusion(np.sqrt(seg_x[j] ** 2 + seg_y[j] ** 2), t, effective_M, D)
-            for j in range(n_points)
-        ]
+        segments.append((seg_x, seg_y, seg_c))
+
+    global_max = max(max(c) for _, _, c in segments)
+    global_max = max(global_max, 1e-9)  # avoids cmin == cmax for tumor
+
+    # pass 2: draw them
+    for seg_x, seg_y, seg_c in segments:
+        fig.add_trace(
+            go.Scatter3d(
+                x=seg_x,
+                y=seg_y,
+                z=seg_c,
+                mode="lines",
+                line={
+                    "color": seg_c,
+                    "colorscale": "YlOrRd",
+                    "width": 10,
+                    "cmin": 0,
+                    "cmax": global_max,
+                },
+                showlegend=False,
+            )
+        )
+
+        for j in range(n_points):
+            m_each = effective_M / len(all_x)
+            px = seg_x[j]
+            py = seg_y[j]
+            r = np.sqrt((all_x - px) ** 2 + (all_y - py) ** 2)
+            con_pt = radial_diffusion(r, t, m_each, D)
+            seg_c.append(np.sum(con_pt))
 
         # add vessel as 3D line
         fig.add_trace(
@@ -270,7 +326,7 @@ def plot_vessel_network(vessels, t, M, D, J, n_points=50):
                 mode="lines",
                 line={
                     "color": seg_c,
-                    "colorscale": "Hot",
+                    "colorscale": "YlOrRd",
                     "width": 10,
                     "cmin": 0,
                     "cmax": max(seg_c),
@@ -285,19 +341,14 @@ def plot_vessel_network(vessels, t, M, D, J, n_points=50):
             "xaxis_title": "X (mm)",
             "yaxis_title": "Y (mm)",
             "zaxis_title": "Concentration (mg/mm^3)",
+            "bgcolor": "black",
+            "xaxis": {"color": "white"},
+            "yaxis": {"color": "white"},
+            "zaxis": {"color": "white"},
         },
         width=700,
         height=600,
-    )
-
-    fig.update_layout(
-        paper_bgcolor="white",
-        scene={
-            "bgcolor": "white",
-            "xaxis": {"color": "black"},
-            "yaxis": {"color": "black"},
-            "zaxis": {"color": "black"},
-        },
+        paper_bgcolor="black",
     )
     return fig
 
@@ -306,8 +357,9 @@ drug_choice = st.sidebar.selectbox(
     "Drug Preset", list(drug_presets.keys()), key="durg_choice"
 )
 preset = drug_presets[drug_choice]
+
 k = st.sidebar.slider(
-    "Release Rate (k)",
+    "Release Rate Constant K (units dependent on release model)",
     min_value=0.01,
     max_value=1.0,
     value=0.3,
@@ -315,7 +367,7 @@ k = st.sidebar.slider(
     key="drug_release_rate",
 )
 C0 = st.sidebar.slider(
-    "Initial Concentration",
+    "Initial Dose/Concentration (µg/mL)",
     min_value=10,
     max_value=200,
     value=100,
@@ -323,36 +375,12 @@ C0 = st.sidebar.slider(
     key="initial_con",
 )
 sim_hours = st.sidebar.slider(
-    "Simulation Hours",
+    "Simulation Duration (hr)",
     min_value=1.00,
     max_value=72.00,
     value=24.00,
     step=0.25,
     key="sim_hrs",
-)
-Emax = st.sidebar.slider(
-    "Max Effect",
-    min_value=50,
-    max_value=100,
-    value=preset["Emax"],
-    step=5,
-    key="max_effectivity",
-)
-EC50_effect = st.sidebar.slider(
-    "Concentration to get 50% Effect",
-    min_value=0,
-    max_value=50,
-    value=preset["EC50_effect"],
-    step=5,
-    key="con_to_get_50_effect",
-)
-EC50_toxic = st.sidebar.slider(
-    "Toxic Effect",
-    min_value=20,
-    max_value=100,
-    value=preset["EC50_toxic"],
-    step=5,
-    key="toxicity",
 )
 n = st.sidebar.slider(
     "N Coefficient (Korsmeyer-Peppas only)",
@@ -363,8 +391,81 @@ n = st.sidebar.slider(
     key="n_coeff",
 )
 n_hill = st.sidebar.slider(
-    "N Hill", min_value=0.5, max_value=3.0, value=1.5, step=0.1, key="n_hill"
+    "Hill Coefficent", min_value=0.5, max_value=3.0, value=1.5, step=0.1, key="n_hill"
 )
+
+
+if drug_choice == "Custom":
+    drug_presets["Custom"]["k_muscle"] = st.sidebar.number_input(
+        "K muscle (to muscle) per hour"
+    )
+    drug_presets["Custom"]["k_muscle_back"] = st.sidebar.number_input(
+        "K muscle back (from muscle) per hour"
+    )
+    drug_presets["Custom"]["k_fat"] = st.sidebar.number_input("K fat (to fat) per hour")
+    drug_presets["Custom"]["k_fat_back"] = st.sidebar.number_input(
+        "K fat back (from fat) per hour"
+    )
+    drug_presets["Custom"]["k_liver"] = st.sidebar.number_input(
+        "K liver (to liver) per hour"
+    )
+    drug_presets["Custom"]["k_elim"] = st.sidebar.number_input(
+        "K Elim (out of liver) per hour"
+    )
+    EC50_effect = drug_presets["Custom"]["EC50_effect"] = st.sidebar.number_input(
+        "EC50 effect (µg/mL)",
+        min_value=0,
+        max_value=50,
+        value=preset["EC50_effect"],
+        format="%.3f",
+    )
+    EC50_toxic = drug_presets["Custom"]["EC50_toxic"] = st.sidebar.number_input(
+        "EC50 toxicity (µg/mL)",
+        min_value=20,
+        max_value=100,
+        value=preset["EC50_toxic"],
+        format="%.3f",
+    )
+    Emax = drug_presets["Custom"]["Emax"] = st.sidebar.number_input(
+        "Emax (% of maximum response)",
+        min_value=50,
+        max_value=100,
+        value=preset["Emax"],
+        format="%.3f",
+    )
+    drug_presets["Custom"]["dwtr"] = st.sidebar.number_input(
+        "Free water diffusivity (mm²/hr)",
+        min_value=0.01,
+        value=float(drug_presets["Custom"]["dwtr"]),
+        step=0.01,
+        format="%.3f",
+    )
+else:
+    Emax = st.sidebar.slider(
+        "Emax (% of maximum response)",
+        min_value=50,
+        max_value=100,
+        value=preset["Emax"],
+        step=5,
+        key=(f"emax_{drug_choice}"),
+    )
+    EC50_effect = st.sidebar.slider(
+        "EC50 effect (µg/mL)",
+        min_value=0,
+        max_value=50,
+        value=preset["EC50_effect"],
+        step=5,
+        key=(f"ec50_{drug_choice}"),
+    )
+    EC50_toxic = st.sidebar.slider(
+        "EC50 toxicity (µg/mL)",
+        min_value=20,
+        max_value=100,
+        value=preset["EC50_toxic"],
+        step=5,
+        key=(f"etox_{drug_choice}"),
+    )
+
 
 params = {
     "k_muscle": preset["k_muscle"],
@@ -522,8 +623,8 @@ with tab2:
     else:
         H = tis_params / (pre["cof"]) ** 2
 
-    xg = np.linspace(-1, 1, 200)
-    yg = np.linspace(-1, 1, 200)
+    xg = np.linspace(-6, 6, 200)
+    yg = np.linspace(-6, 6, 200)
     X, Y = np.meshgrid(xg, yg)
     R = np.sqrt(X**2 + Y**2)
 
@@ -603,9 +704,9 @@ with tab3:
     )
     t_vasc = st.slider(
         "Time in Hours",
-        min_value=0.1,
+        min_value=0.01,
         max_value=24.0,
-        value=1.0,
+        value=0.1,
         step=0.1,
         key="t_vasc",
     )
@@ -617,8 +718,8 @@ with tab3:
             "Tumor tissue has elevated interstitial pressure (negative Starling flux). Passive vascular delivery is negligible — active targeting required."
         )
 
-    xg = np.linspace(-2, 2, 200)
-    yg = np.linspace(-2, 2, 200)
+    xg = np.linspace(-5, 5, 200)
+    yg = np.linspace(-5, 5, 200)
     X, Y = np.meshgrid(xg, yg)
 
     d_vasc = preset["dwtr"] / pre["cof"] ** 2
@@ -693,3 +794,22 @@ with tab3:
 
     fig_vessels = plot_vessel_network(vessels, t_vasc, m_drug, d_vasc, J)
     st.plotly_chart(fig_vessels)
+
+with st.expander("Model assumptions and limitations"):
+    st.markdown("""
+**PK/PD tab**
+- Linear four-compartment model (plasma, muscle, fat, liver) with elimination from the liver only.
+- Rate constants are representative or tuned values, not fitted to patient data. Caffeine's rates are tuned to a ~5 hr plasma half-life.
+- One Hill coefficient is shared by the effect and toxicity curves.
+- Concentrations are in µg/mL as a convention, and the dose is a model input.
+
+**Spatial tabs**
+- Diffusion is a sum of point-source solutions in an infinite, uniform medium, with no boundaries, binding, or elimination in tissue.
+- Diffusivity is free-water D divided by tortuosity squared.
+- The PK tab and the spatial tabs share only the drug's diffusivity. Dose and concentration are not carried between them.
+
+**Vascular tabs**
+- Every vessel releases drug at the same rate per mm of length. Flow, vessel diameter, and branching hierarchy are not modeled.
+- Starling flux `J` scales delivery relative to a reference, so magnitudes show relative, not absolute, delivery.
+- Tumor tissue gives zero passive delivery because its net Starling flux is negative.
+""")
